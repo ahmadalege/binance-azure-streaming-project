@@ -259,7 +259,7 @@ This project is licensed under the MIT License - see LICENSE file for details.
 
 **Your Name** - [LinkedIn](https://www.linkedin.com/in/alegeahmadolaitan/) | [Email](mailto:alegeahmadolaitan@gmail.com)
 
-**Project Link**: [https://github.com/YOUR_USERNAME/binance-azure-streaming](https://github.com/ahmadalege/binance-azure-streaming-project)
+**Project Link**: [🔗](https://github.com/ahmadalege/binance-azure-streaming-project)
 
 ---
 
