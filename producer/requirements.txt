@@ -1,0 +1,4 @@
+azure-eventhub==5.11.4
+azure-eventhub-checkpointstoreblob-aio==1.1.4
+websockets==12.0
+aiohttp==3.9.1
