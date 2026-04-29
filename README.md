@@ -5,26 +5,17 @@
 ![Databricks](https://img.shields.io/badge/Databricks-Spark-FF3621)
 ![Delta Lake](https://img.shields.io/badge/Delta%20Lake-Medallion-00ADD8)
 
-A production-grade real-time data streaming platform that ingests live cryptocurrency market data from the Binance API, processes it through a distributed streaming pipeline, and delivers analytics-ready datasets for real-time trading insights and market monitoring. The system operates 24/7, handling millions of market events daily with sub-second latency.
+## System Overview
 
-## 🎯 System Overview
+This is a continuous real-time data streaming platform that ingests high-frequency cryptocurrency market data from Binance's WebSocket API, processes it with low-latency requirements through a distributed Apache Spark pipeline on Azure Databricks, and maintains a Medallion architecture in Delta Lake for scalable analytics. The system operates 24/7, handling sustained event rates of 50,000+ trades per minute across multiple symbols with end-to-end latency under 5 seconds.
 
-This platform continuously ingests live cryptocurrency trade data from Binance's WebSocket API, processes it in real-time using Apache Spark Structured Streaming on Azure Databricks, and maintains a Medallion architecture in Delta Lake for scalable analytics. The system supports real-time dashboards, algorithmic trading signals, and market surveillance applications.
+### Real-Time Constraints
+- **Event Frequency**: 10-50 trades/second per symbol during normal market hours, spiking to 200+ during volatility
+- **Latency Target**: <5 seconds from trade execution to analytics availability
+- **Throughput**: Sustained processing of 100,000+ events/minute across all symbols
+- **Data Freshness**: Market data available within 1 second of API receipt
 
-### Key Characteristics
-- **Continuous Ingestion**: Live data streams from Binance API with no batch windows
-- **Real-Time Processing**: Event-driven processing with sub-second latency
-- **High Throughput**: Processes 50,000+ trade events per minute across multiple symbols
-- **Fault Tolerant**: Exactly-once processing guarantees with checkpointing
-- **Scalable Storage**: Delta Lake handles petabyte-scale data with ACID transactions
-
-### Performance Metrics
-- **Throughput**: 50,000+ events/minute sustained
-- **Latency**: End-to-end processing < 2 seconds from API to analytics
-- **Availability**: 99.95% uptime with automated failover
-- **Data Freshness**: Market data available within 1 second of trade execution
-
-## 🏗️ Architecture
+## Architecture
 
 ### System Components
 
@@ -105,92 +96,123 @@ This platform continuously ingests live cryptocurrency trade data from Binance's
 
 ### Data Flow
 
-1. **Ingestion**: Python producer establishes persistent WebSocket connections to Binance API, batches events, and publishes to Event Hub
+1. **Ingestion**: Python producer maintains persistent WebSocket connections to Binance API, batches events, and publishes to Event Hub
 2. **Buffering**: Event Hub provides durable buffering with partitioning for parallel consumption
 3. **Processing**: Spark Structured Streaming reads from Event Hub, applies transformations in micro-batches
 4. **Storage**: Data flows through Bronze (raw) → Silver (cleaned) → Gold (aggregated) layers in Delta Lake
 5. **Serving**: Analytics applications query Gold layer for real-time insights and historical trends
 
-## 🔄 Streaming Engineering Concepts
+## State & Processing Logic
 
-### Batch vs Streaming Processing
+### Stateless vs Stateful Processing
 
-**Batch Processing** (traditional ETL):
-- Processes data in fixed time windows (hourly/daily)
-- High latency (hours to days)
-- Suitable for historical analysis
-- Resource-intensive with fixed schedules
-
-**Streaming Processing** (this system):
-- Processes data as it arrives (event-driven)
-- Low latency (seconds to minutes)
-- Continuous processing with real-time insights
-- Efficient resource utilization with auto-scaling
-
-### Micro-Batching Approach
-
-The system uses Spark Structured Streaming with micro-batch execution mode:
-- **Trigger Interval**: 10-second micro-batches for near-real-time processing
-- **State Management**: Maintains streaming state across batches for aggregations
-- **Checkpointing**: Persistent checkpoints ensure exactly-once processing
-- **Watermarking**: Handles late-arriving data up to 5-minute tolerance
-
-### Handling Late-Arriving Data
-
-- **Watermarking**: Defines event-time windows with 5-minute watermark delay
-- **Allowed Lateness**: Late events within watermark are processed
-- **Deduplication**: Event IDs prevent duplicate processing
-- **Compaction**: Periodic compaction removes outdated data
-
-### Stateful vs Stateless Processing
-
-**Stateless Processing** (Bronze layer):
-- Each event processed independently
-- No dependency on previous events
-- Fast, parallelizable operations
+**Stateless Processing** (Bronze/Silver layers):
+- Each event processed independently without dependency on previous events
+- Operations include schema validation, type conversion, and deduplication
+- Highly parallelizable and horizontally scalable
 
 **Stateful Processing** (Gold layer):
-- Maintains state across events (running aggregations)
-- Windowed operations (OHLCV calculations)
-- Requires checkpointing for fault tolerance
+- Maintains state across events for running aggregations and windowed calculations
+- Windowing operations: Tumbling windows for OHLCV (1m, 5m, 15m, 1h), sliding windows for rolling metrics
+- Aggregations over time: Volume-weighted average prices (VWAP), cumulative volume, price volatility measures
+- Requires checkpointing for fault tolerance and state recovery
 
-## 📈 Scalability
+### Windowing Strategy
 
-### Handling High-Frequency Data
+- **Event-Time Windows**: Based on trade timestamps, not processing time
+- **Watermarking**: 5-minute watermark delay to handle out-of-order events
+- **Allowed Lateness**: Events arriving within watermark window are processed
+- **Late Event Handling**: Events beyond watermark are dropped or sent to dead letter queue
 
-Cryptocurrency markets generate high-velocity data:
-- **Event Rate**: 10-50 trades per second per symbol
-- **Peak Volume**: 100K+ events/minute during market volatility
-- **Data Volume**: 500GB+ daily raw data
+## Failure Scenarios & Handling
+
+### API Downtime Handling
+- **Connection Resilience**: Automatic reconnection with exponential backoff (1s, 2s, 4s, max 60s)
+- **Multiple Connections**: Maintain redundant WebSocket connections per symbol
+- **Circuit Breaker**: Suspend connections after 5 consecutive failures, resume with health checks
+- **Data Gap Detection**: Alert when no events received for >30 seconds per symbol
+
+### Duplicate Event Handling
+- **Event Deduplication**: Use trade_id as unique identifier for deduplication
+- **Idempotent Processing**: Delta Lake upsert operations prevent duplicate writes
+- **Stateful Deduplication**: Maintain bloom filters in streaming state for high-throughput deduplication
+
+### Late-Arriving Data
+- **Watermark Configuration**: 5-minute tolerance for out-of-order events
+- **Late Event Processing**: Events within watermark are included in aggregations
+- **Compaction Strategy**: Periodic compaction removes outdated window states
+- **Audit Logging**: Late events logged for analysis and system tuning
+
+### Pipeline Crash Recovery
+- **Checkpointing**: Persistent checkpoints in ADLS Gen2 enable exactly-once processing
+- **Automatic Restart**: Databricks job monitoring restarts failed streaming jobs
+- **State Recovery**: Streaming state restored from last checkpoint, minimizing data loss
+- **Graceful Degradation**: Dead letter queues capture malformed events during recovery
+
+## Design Tradeoffs
+
+### Streaming vs Batch Processing
+
+**Why Streaming**:
+- Real-time market signals require immediate processing (<5s latency)
+- Batch processing introduces 1-2 hour delays, missing intraday trading opportunities
+- Continuous processing enables real-time alerting and automated trading strategies
+
+**Tradeoffs**:
+- **Complexity**: Streaming requires state management, watermarking, and fault tolerance
+- **Cost**: Continuous compute vs batch scheduling (offset by auto-scaling)
+- **Operational Overhead**: 24/7 monitoring vs scheduled batch windows
+
+### Latency vs Cost Optimization
+
+**Latency Requirements**:
+- End-to-end <5s processing drives micro-batch intervals and resource allocation
+- Photon engine and auto-scaling balance performance with cost efficiency
+
+**Cost Considerations**:
+- Auto-scaling from 2-20 workers based on throughput prevents over-provisioning
+- Spot instances used for non-critical workloads during off-peak hours
+- Event Hub throughput units scale dynamically (1-40 TU) based on ingress rates
+
+### Simplicity vs Scalability
+
+**Scalability Design**:
+- Horizontal scaling through Event Hub partitions (32) and Databricks workers (20 max)
+- Partitioning strategy enables parallel processing across symbols and time windows
+- Delta Lake optimizations (Z-ordering, liquid clustering) support concurrent reads/writes
+
+**Simplicity Tradeoffs**:
+- Medallion architecture adds layers but enables data quality and performance isolation
+- Structured Streaming chosen over lower-level APIs for operational simplicity
+- Managed services (Event Hub, Databricks) reduce infrastructure complexity
+
+## How This Scales in Production
 
 ### Horizontal Scaling
+- **Event Hub**: 32 partitions enable parallel consumption by multiple Databricks clusters
+- **Spark Clusters**: Auto-scaling from 2 to 20 workers based on event throughput and processing lag
+- **Delta Lake**: Concurrent reads/writes across multiple consumers without locking
 
-**Event Hub Scaling**:
-- 32 partitions enable parallel consumption
-- Throughput units scale dynamically (1-40 TU)
-- Geo-redundancy for cross-region failover
+### Auto-Scaling Strategy
+- **Throughput-Based Scaling**: Scale up when events/minute exceeds 50K, scale down below 10K
+- **Lag-Based Scaling**: Add workers when processing lag exceeds 30 seconds
+- **Cost Controls**: Maximum worker limits prevent runaway costs during extreme volatility
 
-**Databricks Cluster Scaling**:
-- Auto-scaling from 2 to 20 workers based on throughput
-- Photon engine provides 2-10x performance boost
-- Spot instances for cost optimization
+### Data Partitioning Strategy
+- **Event Hub**: Partitioned by symbol hash to distribute load evenly across partitions
+- **Bronze Layer**: `date/hour/symbol` partitioning for ingestion parallelism and efficient time-based queries
+- **Silver/Gold Layers**: `date/symbol` with Z-ordering on `timestamp` for optimal query performance
+- **Consumer Groups**: Multiple downstream applications can consume independently without interference
 
-**Delta Lake Scaling**:
-- Optimized for concurrent reads/writes
-- Z-ordering on query columns
-- Liquid clustering for adaptive optimization
+## Current Limitations
 
-### Partitioning Strategy
+- **Extreme Spike Handling**: System tested to 200K events/minute; may require manual scaling for black swan events
+- **Monitoring Gaps**: Limited distributed tracing across Event Hub → Databricks → Delta Lake pipeline
+- **No Full Observability**: Missing end-to-end latency tracking and business metric monitoring
+- **Schema Evolution**: Limited support for breaking schema changes without downtime
+- **Cross-Region Failover**: Currently single-region deployment; geo-redundancy planned for Q2
 
-**Event Hub Partitioning**:
-- Partitioned by symbol hash for load distribution
-- Consumer groups enable multiple processing pipelines
-
-**Delta Lake Partitioning**:
-- Bronze: `date/hour/symbol` for ingestion parallelism
-- Silver/Gold: `date/symbol` with Z-ordering on `timestamp`
-
-## 🛡️ Reliability
+## Reliability
 
 ### Fault Tolerance
 
@@ -221,7 +243,7 @@ Cryptocurrency markets generate high-velocity data:
 - Delta Lake time travel for data recovery
 - Cross-region replication for disaster recovery
 
-## 📊 Data Modeling
+## Data Modeling
 
 ### Bronze Layer (Raw Streaming Data)
 
@@ -284,40 +306,7 @@ vwap: decimal(18,8)
 trade_count: long
 ```
 
-## ⚡ Performance Characteristics
-
-### Why Streaming Over Batch
-
-**Batch Limitations**:
-- Hourly aggregations miss intraday patterns
-- 1-2 hour latency for market insights
-- Resource spikes during batch windows
-- No real-time alerting capabilities
-
-**Streaming Advantages**:
-- Immediate detection of market anomalies
-- Real-time trading signals and alerts
-- Continuous model scoring and updates
-- Efficient resource utilization
-
-### Latency Improvements
-
-**Before (Hypothetical Batch)**:
-- Data collection: 1 hour
-- Processing: 30 minutes
-- Analytics available: 1.5 hours after trade
-
-**After (Streaming)**:
-- Data ingestion: < 1 second
-- Processing: < 10 seconds
-- Analytics available: < 15 seconds after trade
-
-**Performance Gains**:
-- 99.9% reduction in data latency
-- Real-time market monitoring
-- Immediate response to price movements
-
-## 📈 Production Considerations
+## Production Considerations
 
 ### Monitoring
 
